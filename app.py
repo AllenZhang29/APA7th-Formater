@@ -2,6 +2,7 @@ import streamlit as st
 from docx import Document
 from docx.shared import Pt, Inches, Cm
 from docx.enum.text import WD_PARAGRAPH_ALIGNMENT, WD_LINE_SPACING
+from docx.enum.text import WD_BREAK
 import re
 import io
 
@@ -103,7 +104,7 @@ def locate_structural_indices(doc, has_title_page):
 
 def process_formatting(doc, config):
     """
-    主处理逻辑
+    主处理逻辑 (V2 Updated)
     """
     # 1. 全局设置
     set_global_document_settings(doc)
@@ -114,19 +115,50 @@ def process_formatting(doc, config):
     paragraphs = doc.paragraphs
     
     # ==========================
+    # 阶段 0: 标题页特殊处理 (Title Page Formatting)
+    # ==========================
+    if config['has_title_page'] and body_start > 0:
+        # 需求：标题页的前6行居中，第一行加粗
+        title_lines_count = 0
+        for i in range(body_start):
+            p = paragraphs[i]
+            if p.text.strip(): # 只处理有字的行
+                title_lines_count += 1
+                if title_lines_count <= 6:
+                    p.paragraph_format.alignment = WD_PARAGRAPH_ALIGNMENT.CENTER
+                    # 第一行加粗 (文章主标题)
+                    if title_lines_count == 1:
+                        for run in p.runs:
+                            run.bold = True
+                else:
+                    # 超过6行的其他内容（如日期后的附加信息），暂维持居中或默认
+                    p.paragraph_format.alignment = WD_PARAGRAPH_ALIGNMENT.CENTER
+
+        # 需求：软换行变硬分页
+        # 检查正文前一段 (body_start - 1)，如果不是分页符，强制插入一个分页符
+        if body_start > 0:
+            prev_p = paragraphs[body_start - 1]
+            # 这是一个简单的判断：直接在上一段末尾加分页符
+            # 这样无论原本是空行还是文字，都会强制换页，并且原来的空行虽然保留但会在上一页
+            # 为了更干净，可以尝试清空中间的空段落，但比较复杂，直接加 Break 最稳妥
+            
+            # 避免重复：如果上一段已经是 Page Break (XML check)，就不加了
+            if '<w:br w:type="page"/>' not in prev_p._element.xml:
+                # 在上一段的最后一个 run 后面加 break，或者新加一个 run
+                prev_p.add_run().add_break(WD_BREAK.PAGE)
+
+    # ==========================
     # 阶段 I: 处理正文 (Body)
     # ==========================
     for i in range(body_start, ref_start):
         p = paragraphs[i]
         text = p.text.strip()
         
-        # 跳过空行，不处理（避免产生带缩进的空行垃圾）
+        # 跳过空行
         if not text:
             continue
             
-        # 应用基础字体和行距
         apply_basic_font_style(p)
-        
         pf = p.paragraph_format
         
         # --- 标题与缩进逻辑 ---
@@ -134,99 +166,82 @@ def process_formatting(doc, config):
         # Case 1: 文章主标题 (Body 的第一段)
         if i == body_start and config['has_article_title']:
             pf.alignment = WD_PARAGRAPH_ALIGNMENT.CENTER
-            pf.first_line_indent = Inches(0) # 标题不缩进
-            # 加粗
+            pf.first_line_indent = Inches(0)
             for run in p.runs:
                 run.bold = True
                 
         # Case 2: 潜在的二级标题 (Level 2 Heading)
-        # 判据：字数少于15 且 结尾无标点 且 不是主标题
         elif len(text.split()) < 15 and text[-1] not in ['.', ':', '?', '!']:
             pf.alignment = WD_PARAGRAPH_ALIGNMENT.LEFT
-            pf.first_line_indent = Inches(0) # 标题不缩进
+            pf.first_line_indent = Inches(0)
             pf.left_indent = Inches(0)
-            # 加粗
             for run in p.runs:
                 run.bold = True
                 
         # Case 3: 普通正文段落
         else:
             pf.alignment = WD_PARAGRAPH_ALIGNMENT.LEFT
-            # APA 7th 首行缩进 0.5 英寸
             pf.first_line_indent = Inches(0.5)
-            # 确保没有奇怪的悬挂缩进
             pf.left_indent = Inches(0) 
 
     # ==========================
     # 阶段 II: 处理参考文献 (Refs)
     # ==========================
     if ref_start < len(paragraphs):
+        # 需求：References 前强制分页
+        # 检查 ref_start 的前一段
+        if ref_start > 0:
+            prev_p_ref = paragraphs[ref_start - 1]
+            if '<w:br w:type="page"/>' not in prev_p_ref._element.xml:
+                 prev_p_ref.add_run().add_break(WD_BREAK.PAGE)
+
         # 1. 处理 "References" 标题
         ref_title_p = paragraphs[ref_start]
-        ref_title_p.text = "References" # 强制修正单复数
+        ref_title_p.text = "References" 
         apply_basic_font_style(ref_title_p)
         ref_title_p.paragraph_format.alignment = WD_PARAGRAPH_ALIGNMENT.CENTER
         ref_title_p.paragraph_format.first_line_indent = Inches(0)
         for run in ref_title_p.runs:
             run.bold = True
             
-        # 2. 获取参考文献条目列表
-        ref_entries = []
-        # 收集 ref_start 之后的所有非空段落
-        entries_indices = [] # 记录索引方便后续删除
+        # 2. 获取并处理条目 (保持原有逻辑，此处省略重复代码，请保留你原文件中 Sort/Hanging 的部分)
+        # ... (这里保留你原来 app.py 中处理 Reference list 和 Sorting 的代码) ...
+        # (为方便你复制，下面我把 Reference List 的处理逻辑简写补全，确保你直接覆盖不出错)
         
+        ref_entries = []
+        entries_indices = []
         for i in range(ref_start + 1, len(paragraphs)):
             p = paragraphs[i]
             if p.text.strip():
                 ref_entries.append(p.text.strip())
                 entries_indices.append(p)
 
-        # 3. 排序逻辑 (如果启用)
         if config['sort_references']:
-            # 警告：这会丢失斜体
             ref_entries.sort()
-            
-            # 删除旧段落 (反向删除以保持索引稳定，虽然 python-docx 删除段落比较hacky)
-            # 这里的简单做法是：清空原段落内容，填入新内容。
-            # 如果数量不一致（比如删了空行），则清空后在末尾追加。
-            
-            # 为了简单稳健：我们只保留标题，清除后面所有段落，然后重新添加
-            # 注意：python-docx 删除段落需要操作 XML，这里用一个更安全的方法：
-            # 将排序后的文本回写。如果原位置不够，就 add_paragraph。
-            
-            # --- 简易回写策略 ---
             current_idx = ref_start + 1
-            # 覆盖现有的
             for text_content in ref_entries:
                 if current_idx < len(paragraphs):
                     p = paragraphs[current_idx]
                     p.text = text_content
                     apply_basic_font_style(p)
-                    # 悬挂缩进
                     p.paragraph_format.first_line_indent = Inches(-0.5)
                     p.paragraph_format.left_indent = Inches(0.5)
                     current_idx += 1
                 else:
-                    # 新增
                     new_p = doc.add_paragraph(text_content)
                     apply_basic_font_style(new_p)
                     new_p.paragraph_format.first_line_indent = Inches(-0.5)
                     new_p.paragraph_format.left_indent = Inches(0.5)
             
-            # 如果原文档段落比新条目多（比如原文档有很多空行），清空剩余的
             while current_idx < len(paragraphs):
                 paragraphs[current_idx].text = ""
-                paragraphs[current_idx].clear() # 尽力清除
-                current_idx += 1
-                
+                paragraphs[current_idx].clear()
+                current_idx += 1     
         else:
-            # 不排序，仅格式化 (保留斜体)
             for i in range(ref_start + 1, len(paragraphs)):
                 p = paragraphs[i]
                 if not p.text.strip(): continue
-                
                 apply_basic_font_style(p)
-                # 悬挂缩进逻辑: Left Indent 0.5, First Line -0.5
                 p.paragraph_format.left_indent = Inches(0.5)
                 p.paragraph_format.first_line_indent = Inches(-0.5)
 
@@ -285,12 +300,12 @@ def check_missing_citations(doc):
 def main():
     st.set_page_config(page_title="APA 7th Format Helper", page_icon="🎓")
 
-    # --- CSS 注入：美化 & 隐藏水印 & 底部签名 ---
+# --- CSS 注入：美化 & 隐藏水印 & 底部签名 ---
+    # 修复：移除了 header 的隐藏，找回侧边栏按钮
     hide_streamlit_style = """
                 <style>
-                #MainMenu {visibility: hidden;}
+                #MainMenu {visibility: visible;} 
                 footer {visibility: hidden;}
-                header {visibility: hidden;}
                 
                 /* 自定义底部签名 */
                 .custom-footer {
@@ -305,6 +320,7 @@ def main():
                     font-size: 14px;
                     font-family: 'Arial', sans-serif;
                     border-top: 1px solid #e6e6e6;
+                    z-index: 999;
                 }
                 </style>
                 """
@@ -312,7 +328,7 @@ def main():
 
     # --- 标题区 ---
     st.title("📄 APA 7th Format Assistant")
-    st.markdown("Designed specifically for **Dr. Jin**'s academic workflow.")
+    # st.markdown("Designed specifically for **Dr. Jin**'s academic workflow.")
     st.markdown("---")
 
     # --- 侧边栏配置 ---
@@ -365,17 +381,35 @@ def main():
             
             st.success("✅ Formatting complete! Ready for download.")
             
-            # --- 引用检查报告 ---
+            # --- 引用检查报告 (V2 Updated) ---
             if check_citations_opt:
                 missing = check_missing_citations(doc)
-                if missing:
-                    st.warning("🧐 **Citation Check Report:**")
-                    st.write("The following in-text citations might be missing from the Reference list:")
-                    for m in missing:
-                        st.markdown(f"- `{m}`")
-                    st.caption("*Note: This is an automated check. Please verify manually.*")
+                
+                # 构建报告文本字符串
+                report_content = ""
+                
+                # 根据是否排序，添加头部提示
+                if sort_references:
+                    report_content += "⚠️ [ACTION REQUIRED] References have been auto-sorted. ITALICS ARE REMOVED. Please re-apply italics to journal/book titles manually.\n\n"
                 else:
-                    st.info("👏 No obvious missing citations found.")
+                    report_content += "ℹ️ [INFO] References order kept as original. Please ensure they are alphabetical.\n\n"
+                
+                if missing:
+                    report_content += "🧐 Potential Missing Citations (In-text vs Reference List):\n"
+                    for m in missing:
+                        report_content += f"- {m}\n"
+                else:
+                    report_content += "✅ No obvious missing citations found.\n"
+                
+                report_content += "\n*Report generated by APA 7th Format Assistant*"
+
+                # UI 展示
+                st.warning("🧐 **Citation Check Report:**")
+                
+                # 使用 st.code 展示报告，这样会自动带有一个 "Copy" 按钮
+                st.code(report_content, language="markdown")
+                
+                st.caption("*Click the copy button in the top-right corner of the box above to send this report.*")
 
             # --- 导出 ---
             bio = io.BytesIO()
