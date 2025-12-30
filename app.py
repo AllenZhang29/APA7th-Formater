@@ -112,7 +112,7 @@ def delete_paragraph(paragraph):
 
 def process_formatting(doc, config):
     """
-    主处理逻辑 (V3 Updated: Title Page Cleaning & Spacing)
+    主处理逻辑 (V3.1 Final: Pixel-Perfect Title Page)
     """
     # 1. 全局设置
     set_global_document_settings(doc)
@@ -129,103 +129,89 @@ def process_formatting(doc, config):
         title_lines_count = 0
         last_title_paragraph = None
         
-        # A. 格式化标题页的内容 (前 body_start 段)
+        # 先把正文第一段的对象存下来，因为后面删行会导致索引变化，但对象引用不变
+        # 这一步非常关键，用于最后在其前方插入分页符
+        first_body_paragraph = paragraphs[body_start]
+        
+        # A. 格式化标题页的所有段落 (包括空行)
         for i in range(body_start):
             p = paragraphs[i]
             
-            # 如果是空行，暂不处理，后面统一清洗
-            if not p.text.strip():
-                continue
-                
-            title_lines_count += 1
-            last_title_paragraph = p # 记录最后一行有字的标题页段落
-            
-            # 1. 应用基础样式 (包括双倍行距 Times New Roman 12pt)
+            # 修正 1: 无论是不是空行，都强制应用双倍行距和字体
+            # 这样标题上方的空行高度才会正确，标题位置才不会偏上
             apply_basic_font_style(p)
-            
-            # 2. 居中对齐
             p.paragraph_format.alignment = WD_PARAGRAPH_ALIGNMENT.CENTER
             
-            # 3. 第一行加粗 (文章主标题)
-            if title_lines_count == 1:
-                for run in p.runs:
-                    run.bold = True
+            # 如果是有字的行，进行计数和加粗处理
+            if p.text.strip():
+                title_lines_count += 1
+                last_title_paragraph = p 
+                
+                # 第一行加粗 (文章主标题)
+                if title_lines_count == 1:
+                    for run in p.runs:
+                        run.bold = True
 
-        # B. 清洗标题页与正文之间的“垃圾空行”并插入分页符
-        # 策略：从 body_start - 1 倒序遍历回到 last_title_paragraph
-        # 为什么要倒序？因为删除 list 元素时倒序最安全
+        # B. 清洗标题页与正文之间的“垃圾空行”
+        # 策略：找到 last_title_paragraph 的索引，删除它之后直到 body_start 之间的所有段落
         if last_title_paragraph:
-            # 这里的逻辑是：我们已经知道 body_start 是正文第一段
-            # 那么 body_start 之前，且在 last_title_paragraph 之后的所有段落，都是多余的空行
-            
-            # 获取 last_title_paragraph 的索引
-            # 注意：由于 paragraphs 是动态对象，直接用索引可能因为之前的删除操作而变化
-            # 但在这里我们还没开始删，所以是安全的。
-            
-            # 我们需要找到 last_title_paragraph 在 paragraphs 中的 index
-            # 为了简单，我们再次遍历一下前 body_start 段
+            # 重新定位 last_title_paragraph 的索引
             last_title_idx = -1
             for idx in range(body_start):
                 if paragraphs[idx] == last_title_paragraph:
                     last_title_idx = idx
                     break
             
-            # 开始清理：从 body_start-1 倒着删到 last_title_idx+1
+            # 倒序删除中间的空行
             if last_title_idx != -1:
                 for idx in range(body_start - 1, last_title_idx, -1):
-                    # 再次确认是空行才删 (双重保险)
+                    # 只删空行 (防止误删内容)
                     if not paragraphs[idx].text.strip():
                         delete_paragraph(paragraphs[idx])
             
-            # C. 在标题页最后一行内容后，强制插入分页符
-            # 这样无论后面有没有内容，正文都会乖乖去下一页
-            # 检查是否已经有了 page break
-            if '<w:br w:type="page"/>' not in last_title_paragraph._element.xml:
-                last_title_paragraph.add_run().add_break(WD_BREAK.PAGE)
+            # C. 修正 2: 在新的一行插入分页符 (Aesthetic Page Break)
+            # 逻辑：在 first_body_paragraph (正文第一段) 的前面，插入一个新的空白段落
+            # 然后在这个新段落里放分页符。这样分页符就独占一行，不会挤在日期后面了。
+            
+            # 检查是否原本就有分页符 (避免双重分页)
+            has_existing_break = False
+            # 检查 last_title_paragraph 里面有没有
+            if '<w:br w:type="page"/>' in last_title_paragraph._element.xml:
+                has_existing_break = True
+            # 检查 first_body_paragraph 里面有没有 (有时候分页符在正文开头)
+            if '<w:br w:type="page"/>' in first_body_paragraph._element.xml:
+                has_existing_break = True
+            
+            if not has_existing_break:
+                # 插入这一行“缓冲带”
+                spacer_p = first_body_paragraph.insert_paragraph_before()
+                # 给这个分页符段落也加上标准格式 (虽然看不见，但为了规范)
+                apply_basic_font_style(spacer_p) 
+                # 添加分页符
+                spacer_p.add_run().add_break(WD_BREAK.PAGE)
 
     # ==========================
     # 阶段 I: 处理正文 (Body)
     # ==========================
-    # 注意：由于我们在上面删除了段落，paragraphs 的长度和索引其实已经变了！
-    # 如果继续用原来的 body_start 索引会导致错位。
-    # 最稳妥的方法：重新获取一次 paragraphs 列表，并重新定位 body_start
-    # 但由于我们删的是 body_start 之前的，body_start 之后的相对顺序没变，
-    # 只是 body_start 的值应该减去删除的行数。
+    # 刷新 paragraphs 列表 (因为刚刚删了行，又插了行)
+    paragraphs = doc.paragraphs
     
-    # 为了代码的鲁棒性（防止索引越界），建议这里重新读取一下 doc.paragraphs
-    # 并且简单的重新定位正文开始（正文开始就是 Title Page 后的第一个非空段）
+    # 重新定位 body_start
+    # 简单粗暴且有效的方法：重新跑一次定位，或者直接找 Page Break 的位置
+    # 由于我们刚刚确保插入了 Page Break，现在找 Page Break 是最稳的
     
-    paragraphs = doc.paragraphs # 刷新列表
-    
-    # 重新寻找新的 body_start (因为前面删了空行，现在的 body_start 可能变小了)
     new_body_start = 0
     if config['has_title_page']:
-        # 略过标题页那种居中的段落，找到第一个左对齐或者首行缩进的？
-        # 不，还是用之前的逻辑：找到 Page Break 后的第一段
         for i, p in enumerate(paragraphs):
+            # 寻找刚刚插入的那个分页符段落，正文在它下一行
             if '<w:br w:type="page"/>' in p._element.xml:
                 new_body_start = i + 1
                 break
-            # 如果是上面刚刚插入的 run break，xml 结构可能不同，需注意
-            # 上面的 add_break(WD_BREAK.PAGE) 会在 xml 里产生 <w:br w:type="page"/>
-            # 但它是在 last_title_paragraph 内部。
-            
-            # 简化逻辑：我们直接找 last_title_paragraph 的下一段
-            if config['has_title_page'] and last_title_paragraph:
-                 if p == last_title_paragraph:
-                     new_body_start = i + 1
-                     break
+    
+    # 重新定位 ref_start (因为行数变了)
+    _, new_ref_start = locate_structural_indices(doc, False)
     
     # 开始处理正文
-    for i in range(new_body_start, ref_start): # 注意 ref_start 可能也因为删除行而需要前移，但通常 ref 在最后，影响较小，除非 doc 很大。
-        # 为保险起见，我们重新定位一下 ref_start
-        pass 
-    
-    # --- 修正 Ref Start ---
-    # 既然删除了行，索引肯定乱了。最安全的做法是：不要依赖索引数字，而是依赖对象。
-    # 但为了不把代码写得太复杂，我们重新跑一次定位 ref 的逻辑是最高效的。
-    _, new_ref_start = locate_structural_indices(doc, False) # has_title_page传False是为了只找Ref
-    
     for i in range(new_body_start, new_ref_start):
         p = paragraphs[i]
         text = p.text.strip()
@@ -235,14 +221,14 @@ def process_formatting(doc, config):
         apply_basic_font_style(p)
         pf = p.paragraph_format
         
-        # Case 1: 文章主标题 (Body 的第一段)
+        # Case 1: 文章主标题
         if i == new_body_start and config['has_article_title']:
             pf.alignment = WD_PARAGRAPH_ALIGNMENT.CENTER
             pf.first_line_indent = Inches(0)
             for run in p.runs:
                 run.bold = True
                 
-        # Case 2: 潜在的二级标题
+        # Case 2: 二级标题
         elif len(text.split()) < 15 and text[-1] not in ['.', ':', '?', '!']:
             pf.alignment = WD_PARAGRAPH_ALIGNMENT.LEFT
             pf.first_line_indent = Inches(0)
@@ -260,7 +246,7 @@ def process_formatting(doc, config):
     # 阶段 II: 处理参考文献 (Refs)
     # ==========================
     if new_ref_start < len(paragraphs):
-        # 强制分页 (和之前逻辑一样)
+        # 强制分页逻辑
         if new_ref_start > 0:
             prev_p_ref = paragraphs[new_ref_start - 1]
             if '<w:br w:type="page"/>' not in prev_p_ref._element.xml:
@@ -280,17 +266,13 @@ def process_formatting(doc, config):
             if p.text.strip():
                 ref_entries.append(p.text.strip())
 
-        # 稍微重构一下写入逻辑，避免删除段落带来的索引困扰
-        # 策略：直接清空 ref_title 之后的所有段落，然后重写
-        # 1. 删除所有旧条目段落
+        # 重写 Reference 逻辑
         for i in range(len(paragraphs) - 1, new_ref_start, -1):
             delete_paragraph(paragraphs[i])
             
-        # 2. 排序 (如果需要)
         if config['sort_references']:
             ref_entries.sort()
             
-        # 3. 追加新段落
         for entry in ref_entries:
             new_p = doc.add_paragraph(entry)
             apply_basic_font_style(new_p)
