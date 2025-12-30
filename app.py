@@ -283,49 +283,144 @@ def process_formatting(doc, config):
 
 def check_missing_citations(doc):
     """
-    引用查漏报告 (只读逻辑)
+    双向引用检查逻辑 (V4 Updated: Two-way & Author+Year Key)
     """
-    text_full = "\n".join([p.text for p in doc.paragraphs])
+    import re
     
-    # 1. 提取参考文献列表的首作者 (假设 Ref 标题后都是条目)
-    # 简易逻辑：找 "References" 后的段落
-    refs_authors = []
-    found_ref = False
-    for p in doc.paragraphs:
+    # 1. 获取全文文本
+    # 为了避免匹配到页眉页脚或 Reference 列表本身，我们需要界定范围
+    # 简单起见，我们假设全文文本就是 process_formatting 之后的 doc 对象
+    # 但为了精准，我们只提取 Ref 标题之前的内容作为 "Body Text"
+    paragraphs = doc.paragraphs
+    body_text = ""
+    ref_text_list = []
+    
+    found_ref_section = False
+    for p in paragraphs:
         txt = p.text.strip()
-        if txt.lower() == 'references':
-            found_ref = True
+        # 简单的状态机，找到 References 标题后切换状态
+        if txt.lower() == 'references' or txt.lower() == 'reference list':
+            found_ref_section = True
             continue
-        if found_ref and txt:
-            # 提取第一个单词作为姓氏 (比如 "Zhang, S. (2020)") -> "Zhang"
-            first_word = txt.split(',')[0].split(' ')[0]
-            if len(first_word) > 1: # 排除杂讯
-                refs_authors.append(first_word)
-
-    # 2. 提取正文引用
-    # 正则策略：匹配 (Name, Year) 或 (Name & Name, Year)
-    # 这是一个非常粗略的正则，用于 MVP
-    potential_citations = re.findall(r'\(([^)]+?,\s?\d{4})\)', text_full)
-    
-    missing_report = []
-    
-    # 3. 对比：正文引用的名字是否出现在 Reference 作者列表中
-    if found_ref:
-        for cite in potential_citations:
-            # cite 可能是 "Wang & Li, 2020"
-            # 只要 cite 包含 refs_authors 中的任何一个，就算匹配成功
-            is_found = False
-            for auth in refs_authors:
-                if auth in cite:
-                    is_found = True
-                    break
             
-            if not is_found:
-                # 再次过滤：有时候引用里包含 'see Table 1' 这种误报
-                if not re.search(r'Table|Figure|See|e\.g\.', cite, re.IGNORECASE):
-                     missing_report.append(cite)
+        if not found_ref_section:
+            body_text += txt + " "
+        else:
+            if txt:
+                ref_text_list.append(txt)
+
+    # ==========================================
+    # Step A: 解析参考文献列表 (Reference List)
+    # 目标：提取 (First_Author_Lastname, Year)
+    # ==========================================
+    ref_keys = set()
+    ref_details = {} # 用于存储原始文本，方便展示
     
-    return list(set(missing_report)) # 去重
+    for ref_item in ref_text_list:
+        # 策略：
+        # 1. 年份：找圆括号里的4位数字，通常在行首附近
+        #    Regex: 匹配行首开始的任意字符，直到发现 (20xx) 或 (n.d.)
+        # 2. 作者：年份之前的部分，取第一个单词作为姓氏
+        
+        # 匹配年份：(2019) 或 (n.d.)
+        year_match = re.search(r'\((\d{4}|n\.d\.)\)', ref_item)
+        
+        if year_match:
+            year = year_match.group(1)
+            
+            # 提取作者：取年份括号之前的所有文本
+            pre_year_text = ref_item[:year_match.start()]
+            
+            # 提取第一个单词作为姓氏 (移除逗号等标点)
+            # 比如 "Wang, I. (2020)" -> "Wang"
+            # 比如 "World Health Organization (2020)" -> "World" (虽然不完美，但够用)
+            if pre_year_text:
+                # 简单的 split 逻辑
+                first_author = pre_year_text.split(',')[0].strip().split(' ')[0]
+                
+                # 清洗一下非字母字符 (比如有些 Ref 前面有奇怪的编号)
+                first_author = re.sub(r'[^a-zA-Z\u4e00-\u9fa5]', '', first_author)
+                
+                if first_author and year:
+                    key = (first_author.lower(), year)
+                    ref_keys.add(key)
+                    # 存储一下原始文本供报告使用
+                    ref_details[key] = ref_item[:50] + "..." # 只存前50个字符
+
+    # ==========================================
+    # Step B: 解析正文引用 (In-text Citations)
+    # 目标：提取 (Author, Year)
+    # ==========================================
+    body_keys = set()
+    
+    # Regex 策略：
+    # 1. 寻找括号内容 (...)
+    # 2. 括号内必须包含年份 \d{4}
+    # 3. 排除 (see Table 1) 这种非引用
+    
+    # 匹配所有括号内容
+    parentheses_content = re.findall(r'\(([^)]+)\)', body_text)
+    
+    for content in parentheses_content:
+        # 1. 必须包含年份 (20xx) 或 n.d.
+        if not re.search(r'\d{4}|n\.d\.', content):
+            continue
+            
+        # 2. 可能包含多个引用，用分号 ; 隔开
+        # 例如: (Wang, 2020; Zhang & Li, 2021)
+        citations = content.split(';')
+        
+        for cite in citations:
+            cite = cite.strip()
+            
+            # 再次确认这一小段里有年份
+            year_match = re.search(r'(\d{4}|n\.d\.)', cite)
+            if not year_match:
+                continue
+                
+            year = year_match.group(1)
+            
+            # 提取作者部分：年份前面的文本
+            # 比如 "Wang et al., 2020" -> "Wang et al.,"
+            # 比如 "Zhang & Li, 2021" -> "Zhang & Li,"
+            author_part = cite[:year_match.start()].strip()
+            
+            # 过滤干扰词 (e.g., see, cf.)
+            ignore_words = ['see', 'e.g.', 'cf.', 'also', 'table', 'figure']
+            is_ignored = False
+            for word in ignore_words:
+                if word in author_part.lower():
+                    # 如果包含干扰词，尝试清洗，取干扰词之后的部分
+                    # 简单处理：如果整个部分就是干扰词（如 (Figure 1)），由于前面校验了年份，这里很难误判
+                    # 但如果是 (see Wang, 2020)，我们需要去掉 "see"
+                    pass 
+            
+            # 提取姓氏：取第一个单词
+            # 处理 "Wang et al." -> Wang
+            # 处理 "Zhang & Li" -> Zhang
+            tokens = re.split(r'[\s,&]+', author_part) # 按空格、逗号、& 分割
+            
+            clean_tokens = [t for t in tokens if t and t.lower() not in ignore_words]
+            
+            if clean_tokens:
+                first_author = clean_tokens[0]
+                # 清洗
+                first_author = re.sub(r'[^a-zA-Z\u4e00-\u9fa5]', '', first_author)
+                
+                if first_author:
+                    body_keys.add((first_author.lower(), year))
+
+    # ==========================================
+    # Step C: 双向对比 (Two-way Match)
+    # ==========================================
+    
+    # 1. 正文有，Ref 列表没有 (Missing in Refs)
+    missing_in_refs = body_keys - ref_keys
+    
+    # 2. Ref 列表有，正文没有 (Missing in Body)
+    missing_in_body = ref_keys - body_keys
+    
+    return list(missing_in_refs), list(missing_in_body)
 
 # ==============================================================================
 # 2. 前端交互模块 (Frontend UI)
@@ -435,35 +530,48 @@ def main():
             
             st.success("✅ Formatting complete! Ready for download.")
             
-            # --- 引用检查报告 (V2 Updated) ---
+# --- 引用检查报告 (V4 Updated: Two-way Report) ---
             if check_citations_opt:
-                missing = check_missing_citations(doc)
+                # 解包返回的两个列表
+                missing_in_refs, missing_in_body = check_missing_citations(doc)
                 
-                # 构建报告文本字符串
                 report_content = ""
                 
-                # 根据是否排序，添加头部提示
+                # 头部提示
                 if sort_references:
-                    report_content += "⚠️ [ACTION REQUIRED] References have been auto-sorted. ITALICS ARE REMOVED. Please re-apply italics to journal/book titles manually.\n\n"
+                    report_content += "⚠️ [WARNING] Auto-sort is ON. Italics in References removed.\n"
                 else:
-                    report_content += "ℹ️ [INFO] References order kept as original. Please ensure they are alphabetical.\n\n"
+                    report_content += "ℹ️ [INFO] Auto-sort is OFF. Formatting checks only.\n"
                 
-                if missing:
-                    report_content += "🧐 Potential Missing Citations (In-text vs Reference List):\n"
-                    for m in missing:
-                        report_content += f"- {m}\n"
+                report_content += "-" * 40 + "\n"
+                
+                # --- Part 1: 正文引了，文献表没列 (最严重) ---
+                if missing_in_refs:
+                    report_content += "🚨 CITED IN TEXT BUT MISSING IN REFERENCES:\n"
+                    report_content += "(Please verify spelling or year matches)\n\n"
+                    for author, year in missing_in_refs:
+                        # 把名字首字母大写，看起来更正规
+                        report_content += f"[ ] {author.title()}, {year}\n"
                 else:
-                    report_content += "✅ No obvious missing citations found.\n"
+                    report_content += "✅ All in-text citations found in Reference list.\n"
                 
+                report_content += "\n" + "-" * 40 + "\n"
+                
+                # --- Part 2: 文献表列了，正文没引 (冗余) ---
+                if missing_in_body:
+                    report_content += "❓ LISTED IN REFERENCES BUT NOT FOUND IN TEXT:\n"
+                    report_content += "(Did you forget to cite these?)\n\n"
+                    for author, year in missing_in_body:
+                        report_content += f"[ ] {author.title()}, {year}\n"
+                else:
+                    report_content += "✅ All references are cited in the text.\n"
+
                 report_content += "\n*Report generated by APA 7th Format Assistant*"
 
                 # UI 展示
                 st.warning("🧐 **Citation Check Report:**")
-                
-                # 使用 st.code 展示报告，这样会自动带有一个 "Copy" 按钮
                 st.code(report_content, language="markdown")
-                
-                st.caption("*Click the copy button in the top-right corner of the box above to send this report.*")
+                st.caption("*Click the red copy button (top-right) to grab this report.*")
 
             # --- 导出 ---
             bio = io.BytesIO()
