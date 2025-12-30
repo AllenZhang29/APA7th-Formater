@@ -400,7 +400,7 @@ def main():
     st.markdown(
         """
         <div class="custom-footer">
-            Designed specially for Dr. [Her Name], made by [My Name] ❤️
+            Designed specially for Dr. Jin
         </div>
         """, 
         unsafe_allow_html=True
